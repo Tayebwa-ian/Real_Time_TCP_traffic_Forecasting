@@ -5,15 +5,17 @@ from network_processor import NetworkProcessor
 from database_handler import DataVault
 
 CONFIG = {
-    "interface": "any", # capture on all interfaces
+    "interface": "any", 
     "duration": 600, # 10min capture
     "model_path": "model_files/tcp_forecast_model.pth",
-    "scaler_x": "model_files/scaler_x.pkl",
-    "scaler_y": "model_files/scaler_y.pkl"
+    "scaler_path": "model_files/scaler_x.pkl",
 }
 
 def run_engine():
-    handler = ModelHandler(CONFIG["model_path"], CONFIG["scaler_x"], CONFIG["scaler_y"])
+    # Removed scaler_y as the model predicts raw Mbps now
+    handler = ModelHandler(CONFIG["model_path"], CONFIG["scaler_path"])
+    
+    # Processor now defaults to lookback=15 (750ms)
     processor = NetworkProcessor(CONFIG["interface"], CONFIG["duration"])
     vault = DataVault()
 
@@ -27,27 +29,33 @@ def run_engine():
             
             feat = processor.extract_features(line)
             if feat:
+                # feat order: [size, delay, bif, iat_mean, iat_std, throughput, d_grad, b_grad, silent]
                 processor.history.append(feat)
                 pred = 0
-                if len(processor.history) == processor.lookback:
-                    pred = handler.predict(processor.history)
                 
-                # Push to DB instead of blocking with CSV/Plotting
-                vault.push_metrics(feat[3], pred, feat[1], feat[2])
+                # Check if we have the full 750ms (15 windows) of history
+                if len(processor.history) == processor.lookback:
+                    pred = handler.predict(list(processor.history))
+                
+                # Updated to pass the full feature list to the vault
+                # The vault now handles indexing the features internally
+                vault.push_metrics(feat, pred)
 
-                # CSV Buffer (Processor already has this list)
+                # Log to local memory buffer
                 processor.log_step(feat, pred)
                 
                 # Periodic Disk Save
                 if len(processor.log_data) >= 100: 
-                    processor.save_to_csv() # This now appends and clears
+                    processor.save_to_csv()
                 
-                sys.stdout.write(f"\r[LIVE] Actual: {feat[3]:.1f} | Pred: {pred:.1f} Mbps")
+                # Update console (throughput is at index 5 in our new 9-feature list)
+                sys.stdout.write(f"\r[LIVE] Actual: {feat[5]:.1f} | Pred: {pred:.1f} Mbps")
                 sys.stdout.flush()
 
     except KeyboardInterrupt:
         print("\nStopping Engine...")
     finally:
+        processor.save_to_csv() # Final save before exit
         proc.terminate()
 
 if __name__ == "__main__":
